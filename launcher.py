@@ -1,5 +1,7 @@
 import os
 import glob
+import platform
+import subprocess
 import time
 import random
 import re
@@ -14,6 +16,57 @@ from rich.prompt import IntPrompt, Prompt
 from roblox_api import RobloxAPI
 from constants import ASSET_GAME_URL
 from utils import is_roblox_running, kill_roblox_processes, get_roblox_base_path
+
+
+# ── platform-aware URI launcher ────────────────────────────────────────────
+
+def _open_uri(uri: str):
+    """Open a protocol URI on any platform."""
+    if platform.system() == "Windows":
+        os.startfile(uri)
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", uri])
+    else:
+        subprocess.Popen(["xdg-open", uri])
+
+
+# ── reusable launch helpers ────────────────────────────────────────────────
+
+
+def _browser_tracker_id() -> int:
+    return random.randint(10_000_000_000, 99_999_999_999)
+
+
+def build_place_launcher_url(place_id: int, game_id: str | None = None) -> str:
+    url = (
+        f"{ASSET_GAME_URL}"
+        f"?request=RequestGame"
+        f"&browserTrackerId={_browser_tracker_id()}"
+        f"&placeId={place_id}"
+        f"&isPlayTogetherGame=false"
+        f"&robloxLocale=en_us"
+        f"&gameLocale=en_us"
+        f"&channel="
+    )
+    if game_id:
+        url += f"&gameId={game_id}"
+    return url
+
+
+def build_protocol_uri(ticket: str, place_id: int, game_id: str | None = None) -> str:
+    launcher_url = build_place_launcher_url(place_id, game_id)
+    launch_time = int(time.time() * 1000)
+    return (
+        f"roblox-player:1"
+        f"+launchmode:play"
+        f"+gameinfo:{ticket}"
+        f"+launchtime:{launch_time}"
+        f"+placelauncherurl:{quote(launcher_url, safe='')}"
+        f"+browsertrackerid:{_browser_tracker_id()}"
+        f"+robloxLocale:en_us"
+        f"+gameLocale:en_us"
+        f"+channel:"
+    )
 
 DEFAULT_REJOIN_DELAY = 15   # seconds to wait before rejoining
 LOG_POLL_INTERVAL = 3       # how often to check log for disconnects
@@ -40,32 +93,12 @@ class GameLauncher:
         self.console = console
         self.current_place_id: int | None = None
         self.current_game_id: str | None = None
+        self.sandbox = None  # set externally when sandbox mode is active
 
         # auto-rejoin state
         self._rejoin_enabled = False
         self._rejoin_thread: threading.Thread | None = None
         self._rejoin_delay = DEFAULT_REJOIN_DELAY
-
-    # ── internal helpers ──────────────────────────────────────────────────
-
-    @staticmethod
-    def _browser_tracker_id() -> int:
-        return random.randint(10_000_000_000, 99_999_999_999)
-
-    def _place_launcher_url(self, place_id: int, game_id: str | None = None) -> str:
-        url = (
-            f"{ASSET_GAME_URL}"
-            f"?request=RequestGame"
-            f"&browserTrackerId={self._browser_tracker_id()}"
-            f"&placeId={place_id}"
-            f"&isPlayTogetherGame=false"
-            f"&robloxLocale=en_us"
-            f"&gameLocale=en_us"
-            f"&channel="
-        )
-        if game_id:
-            url += f"&gameId={game_id}"
-        return url
 
     # ── core launch ───────────────────────────────────────────────────────
 
@@ -75,29 +108,21 @@ class GameLauncher:
             self.console.print("[red]Failed to get auth ticket.[/]")
             return False
 
-        launcher_url = self._place_launcher_url(place_id, game_id)
-        launch_time = int(time.time() * 1000)
-
-        # Modern Roblox launch protocol
-        protocol_uri = (
-            f"roblox-player:1"
-            f"+launchmode:play"
-            f"+gameinfo:{ticket}"
-            f"+launchtime:{launch_time}"
-            f"+placelauncherurl:{quote(launcher_url, safe='')}"
-            f"+browsertrackerid:{self._browser_tracker_id()}"
-            f"+robloxLocale:en_us"
-            f"+gameLocale:en_us"
-            f"+channel:"
-        )
+        protocol_uri = build_protocol_uri(ticket, place_id, game_id)
 
         self.console.print(f"[cyan]Joining place {place_id}...[/]")
 
-        try:
-            os.startfile(protocol_uri)
-        except OSError as exc:
-            self.console.print(f"[red]Failed to launch Roblox: {exc}[/]")
-            return False
+        # Launch on sandbox desktop if active, otherwise normal launch
+        if self.sandbox and self.sandbox.is_active():
+            if not self.sandbox.launch(protocol_uri):
+                self.console.print("[red]Failed to launch Roblox on sandbox desktop.[/]")
+                return False
+        else:
+            try:
+                _open_uri(protocol_uri)
+            except OSError as exc:
+                self.console.print(f"[red]Failed to launch Roblox: {exc}[/]")
+                return False
 
         self.current_place_id = place_id
         self.current_game_id = game_id

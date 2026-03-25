@@ -35,6 +35,62 @@ class HeadlessManager:
     def __init__(self, console: Console):
         self.console = console
         self._active_profile: str | None = None
+        self._detect_leftover()
+
+    def _detect_leftover(self):
+        """
+        Detect if FFlags from a previous session were left behind.
+
+        Checks two things:
+        1. A backup file exists → previous apply wasn't restored.
+        2. No backup but the settings file matches a known profile →
+           likely applied by us in a session that lost its backup.
+
+        In either case, mark the profile as active so _cleanup()
+        will offer to restore on exit.
+        """
+        sf = self._settings_file()
+        bf = self._backup_file()
+        if sf is None:
+            return
+
+        # Case 1: backup file exists → we definitely applied and never restored
+        if bf is not None and bf.exists():
+            # Try to figure out which profile it was
+            self._active_profile = self._identify_profile(sf)
+            if self._active_profile:
+                self.console.print(
+                    f"[yellow]Detected leftover headless flags "
+                    f"({self._active_profile}) from a previous session.[/]"
+                )
+            return
+
+        # Case 2: no backup, but settings file matches a known profile
+        if sf.exists():
+            matched = self._identify_profile(sf)
+            if matched:
+                self._active_profile = matched
+                # Re-create the backup so restore() works properly
+                if bf is not None:
+                    bf.write_text("{}", encoding="utf-8")
+                self.console.print(
+                    f"[yellow]Detected leftover headless flags "
+                    f"({matched}) — will offer to restore on exit.[/]"
+                )
+
+    def _identify_profile(self, sf: Path) -> str | None:
+        """Check if the settings file matches a known profile."""
+        try:
+            flags = json.loads(sf.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+        for name, profile_flags in self.PROFILES.items():
+            # If at least half the profile flags are present, it's a match
+            matched = sum(1 for k in profile_flags if k in flags)
+            if matched >= len(profile_flags) // 2:
+                return name
+        return None
 
     # ── paths ─────────────────────────────────────────────────────────────
 

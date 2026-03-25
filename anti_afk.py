@@ -1,111 +1,29 @@
-import ctypes
-import ctypes.wintypes
 import threading
 import time
 import random
 
 from rich.console import Console
 
-from constants import (
-    WM_KEYDOWN,
-    WM_KEYUP,
-    INPUT_KEYBOARD,
-    KEYEVENTF_KEYUP,
-    AFK_KEYS,
-    DEFAULT_AFK_INTERVAL,
-)
+from constants import AFK_KEYS, DEFAULT_AFK_INTERVAL
 from utils import get_roblox_window_handle
+from background_input import send_key, send_click, get_window_size
 
-
-# ── ctypes structures for SendInput ───────────────────────────────────────────
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", ctypes.c_ushort),
-        ("wScan", ctypes.c_ushort),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
-
-
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
-
-
-class INPUT(ctypes.Structure):
-    _fields_ = [
-        ("type", ctypes.c_ulong),
-        ("ii", INPUT_UNION),
-    ]
-
-
-user32 = ctypes.windll.user32
-
-
-def _make_key_input(vk: int, flags: int = 0) -> INPUT:
-    scan = user32.MapVirtualKeyW(vk, 0)
-    ki = KEYBDINPUT(
-        wVk=vk,
-        wScan=scan,
-        dwFlags=flags,
-        time=0,
-        dwExtraInfo=ctypes.pointer(ctypes.c_ulong(0)),
-    )
-    inp = INPUT(type=INPUT_KEYBOARD)
-    inp.ii.ki = ki
-    return inp
-
-
-def _send_input(*inputs: INPUT):
-    arr = (INPUT * len(inputs))(*inputs)
-    ctypes.windll.user32.SendInput(len(arr), arr, ctypes.sizeof(INPUT))
-
-
-# ── AntiAFK class ─────────────────────────────────────────────────────────────
 
 class AntiAFK:
     """
     Prevents Roblox AFK kick by periodically sending keypresses.
 
-    Strategies
-    ----------
-    foreground : Brings Roblox to front, sends via SendInput (reliable).
-    sendmessage : Posts WM_KEYDOWN/UP to the window handle (may not work
-                  with DirectInput when Roblox is unfocused).
+    In sandbox mode: uses SendInput on the hidden desktop (full input).
+    Without sandbox: uses PostMessage (background, limited to GUI clicks).
     """
 
     def __init__(self, console: Console, interval: int = DEFAULT_AFK_INTERVAL):
         self.console = console
         self.interval = interval
-        self.strategy = "foreground"
+        self.sandbox = None  # set externally when sandbox is active
+        self.restaurant_bot = None  # set externally; skip AFK when restaurant bot is active
         self._running = False
         self._thread: threading.Thread | None = None
-
-    # ── key sending strategies ────────────────────────────────────────────
-
-    def _send_foreground(self, hwnd: int, vk: int):
-        prev = user32.GetForegroundWindow()
-        user32.SetForegroundWindow(hwnd)
-        time.sleep(0.05)
-
-        down = _make_key_input(vk)
-        up = _make_key_input(vk, KEYEVENTF_KEYUP)
-        _send_input(down)
-        time.sleep(0.05)
-        _send_input(up)
-        time.sleep(0.05)
-
-        if prev:
-            user32.SetForegroundWindow(prev)
-
-    def _send_message(self, hwnd: int, vk: int):
-        scan = user32.MapVirtualKeyW(vk, 0)
-        lparam_down = (scan << 16) | 1
-        lparam_up = (scan << 16) | 1 | (1 << 30) | (1 << 31)
-        user32.PostMessageW(hwnd, WM_KEYDOWN, vk, lparam_down)
-        time.sleep(0.05)
-        user32.PostMessageW(hwnd, WM_KEYUP, vk, lparam_up)
 
     # ── background loop ──────────────────────────────────────────────────
 
@@ -117,18 +35,44 @@ class AntiAFK:
                     return
                 time.sleep(1)
 
+            # Skip AFK tick when restaurant bot is actively moving
+            if (self.restaurant_bot is not None
+                    and hasattr(self.restaurant_bot, 'is_running')
+                    and self.restaurant_bot.is_running()):
+                continue
+
+            vk = random.choice(AFK_KEYS)
+
+            # Sandbox mode: full SendInput on hidden desktop
+            if self.sandbox and self.sandbox.is_active():
+                try:
+                    self.sandbox.send_key(vk)
+                    size = self.sandbox.get_window_size()
+                    if size:
+                        w, h = size
+                        cx, cy = w // 2, h // 2
+                        jitter = random.randint(-20, 20)
+                        self.sandbox.send_click(cx + jitter, cy + jitter)
+                except Exception:
+                    pass
+                continue
+
+            # Normal mode: PostMessage (background, limited)
             hwnd = get_roblox_window_handle()
             if hwnd is None:
                 continue
 
-            vk = random.choice(AFK_KEYS)
             try:
-                if self.strategy == "foreground":
-                    self._send_foreground(hwnd, vk)
-                else:
-                    self._send_message(hwnd, vk)
+                send_key(hwnd, vk, hold=0.05)
+                try:
+                    w, h = get_window_size(hwnd)
+                    cx, cy = w // 2, h // 2
+                    jitter = random.randint(-20, 20)
+                    send_click(hwnd, cx + jitter, cy + jitter)
+                except Exception:
+                    pass
             except Exception:
-                pass  # best effort
+                pass
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -139,8 +83,7 @@ class AntiAFK:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         self.console.print(
-            f"[green]Anti-AFK started (every {self.interval}s, "
-            f"strategy: {self.strategy}).[/]"
+            f"[green]Anti-AFK started (every {self.interval}s, background mode).[/]"
         )
 
     def stop(self):
@@ -155,7 +98,3 @@ class AntiAFK:
 
     def set_interval(self, seconds: int):
         self.interval = seconds
-
-    def set_strategy(self, strategy: str):
-        if strategy in ("foreground", "sendmessage"):
-            self.strategy = strategy

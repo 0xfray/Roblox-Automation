@@ -12,8 +12,10 @@ class Config:
         "default_headless": False,
         "afk_interval": DEFAULT_AFK_INTERVAL,
         "afk_enabled": True,
-        "afk_strategy": "foreground",
         "headless_profile": "potato",
+        "restaurant_profile": "",
+        "restaurant_auto_start": False,
+        "accounts": [],
     }
 
     def __init__(self, base_dir: str | None = None):
@@ -61,20 +63,24 @@ class Config:
         self._key_path.write_bytes(key)
         return key
 
-    def store_cookie(self, cookie: str):
+    def encrypt_value(self, plaintext: str) -> str:
         fernet = Fernet(self._get_or_create_key())
-        encrypted = fernet.encrypt(cookie.encode()).decode()
-        self.set("cookie", encrypted)
+        return fernet.encrypt(plaintext.encode()).decode()
 
-    def get_cookie(self) -> str:
-        raw = self._data.get("cookie", "")
-        if not raw:
+    def decrypt_value(self, ciphertext: str) -> str:
+        if not ciphertext:
             return ""
         try:
             fernet = Fernet(self._get_or_create_key())
-            return fernet.decrypt(raw.encode()).decode()
+            return fernet.decrypt(ciphertext.encode()).decode()
         except (InvalidToken, Exception):
             return ""
+
+    def store_cookie(self, cookie: str):
+        self.set("cookie", self.encrypt_value(cookie))
+
+    def get_cookie(self) -> str:
+        return self.decrypt_value(self._data.get("cookie", ""))
 
     def clear_cookie(self):
         self.set("cookie", "")
